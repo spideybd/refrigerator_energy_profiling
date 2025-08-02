@@ -9,7 +9,7 @@ import os
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Cloud Fridge Monitor & Control",
+    page_title="Cloud Fridge Monitor",
     page_icon="🧊",
     layout="wide"
 )
@@ -27,7 +27,6 @@ except (FileNotFoundError, KeyError):
 
 # --- Tuya Function Codes (Update these if yours are different!) ---
 # Find these in your Tuya IoT Project under: Devices -> Debug Device
-SWITCH_CODE = 'switch_1'
 POWER_CODE = 'cur_power'
 VOLTAGE_CODE = 'cur_voltage'
 CURRENT_CODE = 'cur_current'
@@ -42,7 +41,7 @@ except Exception as e:
 
 # --- Data Logging & kWh Calculation Functions (No Changes Here) ---
 DATA_FILE = "energy_log.csv"
-# ... (The init_data_log, log_data, and calculate_total_kwh functions remain the same as before)
+
 def init_data_log():
     if not os.path.exists(DATA_FILE):
         df = pd.DataFrame(columns=["timestamp", "power_w", "voltage_v", "current_ma"])
@@ -66,8 +65,8 @@ def calculate_total_kwh(df):
 
 
 # --- Main Application ---
-st.title("🧊 Cloud Fridge Monitor & Control")
-st.caption(f"Controlling Device ID: {DEVICE_ID}")
+st.title("🧊 Cloud Fridge Energy Monitor")
+st.caption(f"Monitoring Device ID: {DEVICE_ID}")
 init_data_log()
 placeholder = st.empty()
 
@@ -80,23 +79,11 @@ while True:
             status_map = {item['code']: item['value'] for item in response['result']}
 
             # Extract current states
-            is_on = status_map.get(SWITCH_CODE, False)
             power = status_map.get(POWER_CODE, 0) / 10.0
             voltage = status_map.get(VOLTAGE_CODE, 0) / 10.0
             current = status_map.get(CURRENT_CODE, 0)
 
             with placeholder.container():
-                st.header("Remote Control")
-                toggle_state = st.toggle("Switch", value=is_on, key="control_switch")
-
-                if toggle_state != is_on:
-                    commands = {'commands': [{'code': SWITCH_CODE, 'value': toggle_state}]}
-                    openapi.post(f'/v1.0/devices/{DEVICE_ID}/commands', commands)
-                    st.toast(f"Turning switch {'ON' if toggle_state else 'OFF'}...")
-                    time.sleep(2) # Give time for command to execute
-                    st.experimental_rerun()
-
-                st.divider()
                 st.header("Live Energy Data")
                 log_data(power, voltage, current)
                 df = pd.read_csv(DATA_FILE)
