@@ -1,7 +1,7 @@
 # dashboard.py
 
 import streamlit as st
-import tinytuya
+from tuya_iot import TuyaOpenAPI
 import pandas as pd
 import time
 from datetime import datetime
@@ -9,85 +9,96 @@ import os
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Fridge Energy Monitor",
-    page_icon="⚡",
+    page_title="Cloud Fridge Monitor & Control",
+    page_icon="🧊",
     layout="wide"
 )
 
-# Load secrets from Streamlit's secrets management
-DEVICE_ID = st.secrets["DEVICE_ID"]
-DEVICE_IP = st.secrets["DEVICE_IP"]
-LOCAL_KEY = st.secrets["LOCAL_KEY"]
-# ------------------------------------
+# --- Load Secrets from Streamlit's secrets management ---
+# Make sure you have these in your Streamlit Cloud app's secrets!
+try:
+    ACCESS_ID = st.secrets["ACCESS_ID"]
+    ACCESS_SECRET = st.secrets["ACCESS_SECRET"]
+    API_ENDPOINT = st.secrets["API_ENDPOINT"]
+    DEVICE_ID = st.secrets["DEVICE_ID"]
+except (FileNotFoundError, KeyError):
+    st.error("Could not find Tuya credentials. Please add them to your secrets.")
+    st.stop()
 
-# --- Data Logging Setup ---
+# --- Tuya Function Codes (Update these if yours are different!) ---
+# Find these in your Tuya IoT Project under: Devices -> Debug Device
+SWITCH_CODE = 'switch_1'
+POWER_CODE = 'cur_power'
+VOLTAGE_CODE = 'cur_voltage'
+CURRENT_CODE = 'cur_current'
+
+# --- Connect to Tuya Cloud ---
+try:
+    openapi = TuyaOpenAPI(API_ENDPOINT, ACCESS_ID, ACCESS_SECRET)
+    openapi.connect()
+except Exception as e:
+    st.error(f"Failed to connect to Tuya Cloud. Please check your credentials. Error: {e}")
+    st.stop()
+
+# --- Data Logging & kWh Calculation Functions (No Changes Here) ---
 DATA_FILE = "energy_log.csv"
-
+# ... (The init_data_log, log_data, and calculate_total_kwh functions remain the same as before)
 def init_data_log():
     if not os.path.exists(DATA_FILE):
         df = pd.DataFrame(columns=["timestamp", "power_w", "voltage_v", "current_ma"])
         df.to_csv(DATA_FILE, index=False)
 
 def log_data(power, voltage, current):
-    new_data = pd.DataFrame([{
-        "timestamp": datetime.now(),
-        "power_w": power,
-        "voltage_v": voltage,
-        "current_ma": current
-    }])
+    new_data = pd.DataFrame([{"timestamp": datetime.now(), "power_w": power, "voltage_v": voltage, "current_ma": current}])
     new_data.to_csv(DATA_FILE, mode='a', header=False, index=False)
 
-# --- NEW: kWh Calculation Function ---
 def calculate_total_kwh(df):
-    """Calculates the total energy consumption in kWh from the log data."""
-    if len(df) < 2:
-        return 0.0  # Not enough data to calculate
-
+    if len(df) < 2: return 0.0
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.sort_values('timestamp')
-
-    # Calculate time difference between readings in seconds
     df['time_diff'] = df['timestamp'].diff().dt.total_seconds()
-
-    # Calculate average power between consecutive readings (trapezoidal rule)
     df['avg_power'] = df['power_w'].rolling(window=2).mean()
-
-    # Energy in Joules for each interval = avg_power (W) * time_diff (s)
     df['energy_joules'] = df['avg_power'] * df['time_diff']
-
-    # Total energy in Joules is the sum of all intervals
     total_joules = df['energy_joules'].sum()
-
-    # Convert Joules to kWh (1 kWh = 3,600,000 Joules)
     total_kwh = total_joules / 3600000
-    
     return total_kwh
+# --- End of helper functions ---
+
 
 # --- Main Application ---
-st.title("Refrigerator Real-Time Energy Monitor")
-st.caption(f"Device ID: {DEVICE_ID}")
-
+st.title("🧊 Cloud Fridge Monitor & Control")
+st.caption(f"Controlling Device ID: {DEVICE_ID}")
 init_data_log()
 placeholder = st.empty()
 
-try:
-    d = tinytuya.OutletDevice(DEVICE_ID, DEVICE_IP, LOCAL_KEY)
-    d.set_version(3.5)
-except Exception as e:
-    st.error(f"Failed to initialize connection to the Tuya device. Please check your configuration. Error: {e}")
-    st.stop()
-
 while True:
     try:
-        data = d.status()
-        if 'dps' in data:
-            power = data['dps'].get('19', 0) / 10.0
-            voltage = data['dps'].get('20', 0) / 10.0
-            current = data['dps'].get('18', 0)
+        # Get device status from the cloud
+        response = openapi.get(f"/v1.0/devices/{DEVICE_ID}/status")
 
-            log_data(power, voltage, current)
+        if response.get('success', False):
+            status_map = {item['code']: item['value'] for item in response['result']}
+
+            # Extract current states
+            is_on = status_map.get(SWITCH_CODE, False)
+            power = status_map.get(POWER_CODE, 0) / 10.0
+            voltage = status_map.get(VOLTAGE_CODE, 0) / 10.0
+            current = status_map.get(CURRENT_CODE, 0)
 
             with placeholder.container():
+                st.header("Remote Control")
+                toggle_state = st.toggle("Switch", value=is_on, key="control_switch")
+
+                if toggle_state != is_on:
+                    commands = {'commands': [{'code': SWITCH_CODE, 'value': toggle_state}]}
+                    openapi.post(f'/v1.0/devices/{DEVICE_ID}/commands', commands)
+                    st.toast(f"Turning switch {'ON' if toggle_state else 'OFF'}...")
+                    time.sleep(2) # Give time for command to execute
+                    st.experimental_rerun()
+
+                st.divider()
+                st.header("Live Energy Data")
+                log_data(power, voltage, current)
                 df = pd.read_csv(DATA_FILE)
                 total_kwh = calculate_total_kwh(df)
 
@@ -97,21 +108,16 @@ while True:
                 col3.metric("💡 Current", f"{current} mA")
                 col4.metric("🔋 Total Usage", f"{total_kwh:.3f} kWh")
 
-                # --- Historical Data Chart ---
-                st.subheader("Power Usage Over Time (Last 100 readings)")
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                recent_df = df.tail(100)
-                st.line_chart(recent_df.rename(columns={'timestamp':'index'}).set_index('index')['power_w'])
-                
-                with st.expander("Show Raw Data Log"):
-                    st.dataframe(df.tail(20))
+                st.subheader("📊 Power Usage Over Time")
+                st.line_chart(df.rename(columns={'timestamp':'index'}).set_index('index')['power_w'].tail(100))
         else:
             with placeholder.container():
-                st.warning("Waiting for data... The device did not return DPS values.")
+                st.error(f"Error from Tuya API: {response.get('msg', 'Unknown Error')}")
 
     except Exception as e:
         with placeholder.container():
-            st.error(f"An error occurred while fetching data: {e}")
-            st.warning("Will attempt to reconnect in 15 seconds...")
+            st.error(f"An error occurred: {e}")
+            st.warning("Retrying in 30 seconds...")
     
-    time.sleep(15)
+    # Cloud APIs have rate limits, so a longer sleep time is better
+    time.sleep(30)
